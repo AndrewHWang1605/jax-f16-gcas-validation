@@ -5,7 +5,7 @@
 
 </div>
 
-This repository contains a simple simulation of the F16 GCAS system. The GCAS autopilot is based on [this paper](https://stanleybak.com/papers/heidlauf2018arch.pdf) by Heidlauf et al. and the JAX implementation of the F-16 dynamics from [this package](https://github.com/MIT-REALM/jax-f16).
+This repository contains a simple simulation of the F16 Ground Collision Avoidance System (GCAS). The GCAS autopilot is based on [this paper](https://stanleybak.com/papers/heidlauf2018arch.pdf) by Heidlauf et al. and the JAX implementation of the F-16 dynamics from [this package](https://github.com/MIT-REALM/jax-f16).
 
 Thanks to JAX, the the autopilot and the dynamics are differentiable. Note that some minor changes were made to the original python implementation of the GCAS autopilot to make it compatible with JAX. Notably, the GCAS does not depend on the current time, but only the current state of the aircraft.
 
