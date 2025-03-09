@@ -44,7 +44,9 @@ class F16System:
                     p: float = 0.0,
                     q: float = 0.0,
                     r: float = 0.0,
-                    sensor_seed: int = 0):
+                    sensor_seed: int = 0,
+                    prop_noise_mean: jnp.array = jnp.zeros(16),
+                    prop_noise_std: jnp.array = jnp.ones(16)*0.001):
         
         self.T = T
         self.dt = dt
@@ -73,7 +75,8 @@ class F16System:
         noise_std = noise_std.at[8].set(0.1)   # Yaw rate noise
         self.noise_std = noise_std
         self.noise_cov = jnp.diag(jnp.square(self.noise_std))
-        self.sensor = GaussianNoisySensor(self.noise_mean, self.noise_cov)
+        prop_noise_cov = jnp.diag(jnp.square(prop_noise_std))
+        self.sensor = GaussianNoisySensor(prop_noise_mean, prop_noise_cov)
         
         # Save the initial flight state.
         self.initial_state = f16state(vt, [alpha, beta], [phi, theta, psi],
