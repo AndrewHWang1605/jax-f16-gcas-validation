@@ -11,16 +11,7 @@ from jax_f16.highlevel.controlled_f16 import controlled_f16
 from gcas import GcasAutopilot
 from sensor import GaussianNoisySensor
 
-# Using altitude of 0 as the crash threshold
 CRASH_ALT = 0
-
-def euler_integration(autopilot, sensor, x, dt, steps=10):
-    for _ in range(steps):
-        # Not used in our rollout since step() does the integration.
-        x_meas = sensor.apply_noise(x)[1]
-        xdot = controlled_f16(x, autopilot.get_u_ref(x_meas)).xd
-        x = x + xdot * dt
-    return x
 
 @dataclass
 class FlightStep:
@@ -82,29 +73,27 @@ class F16System:
         noise_std = noise_std.at[8].set(0.1)   # Yaw rate noise
         self.noise_std = noise_std
         self.noise_cov = jnp.diag(jnp.square(self.noise_std))
-        # Create a stateless sensor (its apply_noise will accept a key).
         self.sensor = GaussianNoisySensor(self.noise_mean, self.noise_cov)
         
         # Save the initial flight state.
-        self.initial_state = f16state(vt, [alpha, beta], [phi, theta, psi], [p, q, r], [0, 0, alt], power, [0, 0, 0])
+        self.initial_state = f16state(vt, [alpha, beta], [phi, theta, psi],
+                                      [p, q, r], [0, 0, alt], power, [0, 0, 0])
         # Initialize the sensor key.
         self.sensor_key = jax.random.PRNGKey(sensor_seed)
         
     def step(self, carry, i, autopilot, sensor, dt, steps):
         """
-        Perform one simulation step.
-        The carry is a tuple (state, sensor_key).
-        At each substep we sample a new disturbance (and update the sensor key),
-        apply the disturbance, and update the state.
+        Perform one overall simulation step.
+        The carry is a tuple: (state, sensor_key).
+        At each Euler substep, we update the state with a newly sampled disturbance.
         We record all substep disturbances.
         """
         state, sensor_key = carry
-        state_snapshot = state  # Record the state at the beginning of the time step.
-        disturbances_list = []  # To store disturbance at each substep.
+        state_snapshot = state  # record the state at the beginning of the overall step
+        disturbances_list = []
         new_state = state
         for _ in range(steps):
             sensor_key, noisy_state = sensor.apply_noise(sensor_key, new_state)
-            # The disturbance is the difference between the noisy measurement and the true state.
             disturbance = noisy_state - new_state
             disturbances_list.append(disturbance)
             u_ref = autopilot.get_u_ref(noisy_state)
@@ -123,26 +112,18 @@ class F16System:
             if self.mu(step.state) < c:
                 return False
         return True
-
-    def robustness(self, state, c):
-        return self.mu(state) - c
     
     def rollout(self) -> FlightTrajectory:
         """
-        Run the simulation over self.T timesteps using jax.lax.scan.
-        The simulation always starts from the same deterministic initial state,
-        but the sensor_key is carried through so that disturbances vary.
-        After the rollout, we update self.sensor_key so subsequent rollouts
-        are independent.
+        Run the simulation over self.T timesteps using jax.lax.scan,
+        recording at each step the state and the disturbances.
         """
         def scan_step(carry, i):
             return self.step(carry, i, self.ap, self.sensor, self.dt, self.euler_steps)
         
-        # Each rollout starts from the same initial state.
         init_carry = (self.initial_state, self.sensor_key)
         final_carry, records = jax.lax.scan(scan_step, init_carry, jnp.arange(self.T))
-        # Update the sensor key for future rollouts.
-        self.sensor_key = final_carry[1]
+        self.sensor_key = final_carry[1]  # update key for future rollouts
         states, disturbances = records
         trajectory = FlightTrajectory()
         for i, (state, disturbance) in enumerate(zip(states, disturbances)):
@@ -150,44 +131,62 @@ class F16System:
             trajectory.add_step(time, state, disturbance)
         return trajectory
     
-    def trajectory_log_likelihood(self, trajectory: FlightTrajectory) -> float:
+    def rollout_min_altitude_and_loglik(self):
         """
-        Compute the log-likelihood of the given trajectory.
-        We sum over all substeps recorded in each FlightStep.
-        Only dimensions with nonzero noise (here, the IMU channels: indices 6, 7, 8)
-        are used in the calculation.
+        A memory-optimized rollout that computes both the minimum altitude
+        and the cumulative log likelihood over the trajectory.
+        The carry is now a tuple: (state, sensor_key, min_alt, cum_log_like).
+        We record at each overall step the current (min_alt, cum_log_like).
         """
         def gaussian_log_pdf(x, mean, std):
-            mask = std > 0
-            masked_x = x[mask]
-            masked_mean = mean[mask]
-            masked_std = std[mask]
-            log_coeff = -0.5 * jnp.log(2 * jnp.pi) - jnp.log(masked_std)
-            log_exponent = -0.5 * (((masked_x - masked_mean) / masked_std) ** 2)
-            return jnp.sum(log_coeff + log_exponent)
+            eps = 1e-30
+            log_coeff = -0.5 * jnp.log(2 * jnp.pi) - jnp.log(std + eps)
+            log_exponent = -0.5 * ((x - mean) / (std + eps))**2
+            log_pdf = log_coeff + log_exponent
+            log_pdf = jnp.where(std > 0, log_pdf, 0.0)
+            return jnp.sum(log_pdf)
+
+        def scan_step(carry, i):
+            state, sensor_key, min_alt, cum_log_like = carry
+            new_carry, record = self.step((state, sensor_key), i, self.ap, self.sensor, self.dt, self.euler_steps)
+            new_state, new_sensor_key = new_carry
+            current_alt = self.mu(new_state)
+            new_min_alt = jnp.minimum(min_alt, current_alt)
+            _, disturbances_arr = record
+            step_log_like = 0.0
+            for j in range(disturbances_arr.shape[0]):
+                step_log_like += gaussian_log_pdf(disturbances_arr[j], self.noise_mean, self.noise_std)
+            new_cum_log_like = cum_log_like + step_log_like
+            return (new_state, new_sensor_key, new_min_alt, new_cum_log_like), (new_min_alt, new_cum_log_like)
         
-        log_likelihood = 0.0
-        for step in trajectory.get_trajectory():
-            for substep in step.disturbance:
-                log_likelihood += gaussian_log_pdf(substep, self.noise_mean, self.noise_std)
-        return float(log_likelihood)
+        init_min_alt = self.mu(self.initial_state)
+        init_cum_log_like = 0.0
+        init_carry = (self.initial_state, self.sensor_key, init_min_alt, init_cum_log_like)
+        final_carry, outputs = jax.lax.scan(scan_step, init_carry, jnp.arange(self.T))
+        self.sensor_key = final_carry[1]
+        final_min_alt = final_carry[2]
+        final_cum_log_like = final_carry[3]
+        return final_min_alt, final_cum_log_like, outputs
+
 
 def direct_estimation(system: F16System, num_trials: int) -> float:
     """
-    Run num_trials independent simulations using system.rollout() and compute
-    the failure probability as the fraction of trajectories that fail (i.e.,
-    at least one state has altitude < CRASH_ALT).
-    For each trajectory, print its log likelihood and its minimum altitude.
+    Run num_trials independent simulations.
+    For each trajectory, print its final cumulative log likelihood,
+    the progression of log likelihood (if desired), and the minimum altitude.
+    Compute the failure probability as the fraction of trajectories that fail
+    (i.e., at least one state has altitude < CRASH_ALT).
     """
     failure_count = 0
-    for i in tqdm(range(num_trials)):
-        trajectory = system.rollout()
-        log_likelihood = system.trajectory_log_likelihood(trajectory)
-        # Compute the minimum altitude across the trajectory.
-        min_altitude = min(system.mu(step.state) for step in trajectory.get_trajectory())
-        print(f"Trajectory {i} log likelihood: {log_likelihood}, min altitude: {min_altitude}")
-        
-        states = trajectory.get_trajectory()
-        if not system.isSuccess(states, c=CRASH_ALT):
+    min_alts = []
+    log_likes = []
+    for i in tqdm(range(num_trials), desc="Running Rollouts"):
+        # Use the memory-optimized rollout that computes min altitude and cumulative log likelihood.
+        min_alt, cum_log_like, progression = system.rollout_min_altitude_and_loglik()
+        #print(f"Trajectory {i}: final cumulative log likelihood = {cum_log_like}, min altitude = {min_alt}")
+        # Optionally, you could also print or plot the progression array.
+        if min_alt < CRASH_ALT:
             failure_count += 1
-    return failure_count / num_trials
+        min_alts.append(min_alt)
+        log_likes.append(cum_log_like)
+    return failure_count / num_trials, min_alts, log_likes
