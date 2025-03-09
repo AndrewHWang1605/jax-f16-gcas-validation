@@ -64,7 +64,7 @@ def sim_gcas(
 
     noise_mean = jnp.zeros(16)
     noise_mean.at[11].set(10)
-    noise_cov = jnp.diag(jnp.square(jnp.array([1.0, 0.1, 0.1, 0.1, 0.1, 0.1, 0.2, 0.2, 0.2, 10, 10, 10, 1, 1, 1, 1])))
+    noise_cov = jnp.diag(jnp.square(jnp.array([0, 0, 0, 0, 0, 0, 0.1, 0.1, 0.1, 0, 0, 0, 0, 0, 0, 0])))
     sensor = GaussianNoisySensor(noise_mean, noise_cov)
     x = f16state(vt, [alpha, beta], [phi, theta, psi], [p, q, r], [0, 0, alt], power, [0, 0, 0])
 
