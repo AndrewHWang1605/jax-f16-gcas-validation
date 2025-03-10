@@ -2,6 +2,7 @@ import math
 import jax
 import jax.numpy as jnp
 from numpy import deg2rad
+from jax.scipy.stats.multivariate_normal import logpdf as multivar_gauss_logpdf
 from dataclasses import dataclass
 from tqdm import tqdm
 
@@ -69,7 +70,7 @@ class F16System:
         # Define the sensor noise distribution.
         # Only the IMU channels (indices 6,7,8) have noise
         self.noise_mean = jnp.zeros(16)
-        noise_std = jnp.zeros(16)
+        noise_std = jnp.ones(16) + 1e-10
         noise_std = noise_std.at[6].set(0.05)   # Roll rate noise
         noise_std = noise_std.at[7].set(0.1)   # Pitch rate noise
         noise_std = noise_std.at[8].set(0.1)   # Yaw rate noise
@@ -141,13 +142,6 @@ class F16System:
         The carry is now a tuple: (state, sensor_key, min_alt, cum_log_like).
         We record at each overall step the current (min_alt, cum_log_like).
         """
-        def gaussian_log_pdf(x, mean, std):
-            eps = 1e-30
-            log_coeff = -0.5 * jnp.log(2 * jnp.pi) - jnp.log(std + eps)
-            log_exponent = -0.5 * ((x - mean) / (std + eps))**2
-            log_pdf = log_coeff + log_exponent
-            log_pdf = jnp.where(std > 0, log_pdf, 0.0)
-            return jnp.sum(log_pdf)
 
         def scan_step(carry, i):
             state, sensor_key, min_alt, cum_log_like = carry
@@ -156,11 +150,9 @@ class F16System:
             current_alt = self.mu(new_state)
             new_min_alt = jnp.minimum(min_alt, current_alt)
             _, disturbances_arr = record
-            step_log_like = 0.0
-            for j in range(disturbances_arr.shape[0]):
-                step_log_like += gaussian_log_pdf(disturbances_arr[j], self.noise_mean, self.noise_std)
+            step_log_like = gaussian_log_pdf_traj(disturbances_arr, self.noise_mean, self.noise_cov)
             new_cum_log_like = cum_log_like + step_log_like
-            return (new_state, new_sensor_key, new_min_alt, new_cum_log_like), (new_min_alt, new_cum_log_like)
+            return (new_state, new_sensor_key, new_min_alt, new_cum_log_like), (new_min_alt, new_cum_log_like, disturbances_arr)
         
         init_min_alt = self.mu(self.initial_state)
         init_cum_log_like = 0.0
@@ -193,3 +185,20 @@ def direct_estimation(system: F16System, num_trials: int) -> float:
         min_alts.append(min_alt)
         log_likes.append(cum_log_like)
     return failure_count / num_trials, min_alts, log_likes
+
+def gaussian_log_pdf(x, mean, cov):
+    return multivar_gauss_logpdf(x, mean, cov)
+
+    # eps = 1e-30
+    # log_coeff = -0.5 * jnp.log(2 * jnp.pi) - jnp.log(std + eps)
+    # log_exponent = -0.5 * ((x - mean) / (std + eps))**2
+    # log_pdf = log_coeff + log_exponent
+    # log_pdf = jnp.where(std > 0, log_pdf, 0.0)
+    # return jnp.sum(log_pdf)
+
+def gaussian_log_pdf_traj(disturbances_arr, mean, cov):
+    step_log_like = 0.0
+    for j in range(disturbances_arr.shape[0]):
+        step_log_like += gaussian_log_pdf(disturbances_arr[j], mean, cov)
+    return step_log_like
+
