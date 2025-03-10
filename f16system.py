@@ -71,9 +71,9 @@ class F16System:
         # Only the IMU channels (indices 6,7,8) have noise
         self.noise_mean = jnp.zeros(16)
         noise_std = jnp.ones(16) + 1e-10
-        noise_std = noise_std.at[6].set(0.05)   # Roll rate noise
-        noise_std = noise_std.at[7].set(0.1)   # Pitch rate noise
-        noise_std = noise_std.at[8].set(0.1)   # Yaw rate noise
+        noise_std = noise_std.at[6].set(0.2)   # Roll rate noise
+        noise_std = noise_std.at[7].set(0.2)   # Pitch rate noise
+        noise_std = noise_std.at[8].set(0.2)   # Yaw rate noise
         self.noise_std = noise_std
         self.noise_cov = jnp.diag(jnp.square(self.noise_std))
         prop_noise_cov = jnp.diag(jnp.square(prop_noise_std))
@@ -88,24 +88,31 @@ class F16System:
     def step(self, carry, i, autopilot, sensor, dt, steps):
         """
         Perform one overall simulation step.
-        The carry is a tuple: (state, sensor_key).
-        At each Euler substep, we update the state with a newly sampled disturbance.
-        We record all substep disturbances.
+        
+        The disturbance returned is that from the first substep, so
+        the resulting disturbance array (over all overall steps) is of shape (T, 16).
+
+        Controller deciding new actuator output runs once for every step, but physics is
+        propagated steps times to reduce nonlinearity error.      
         """
         state, sensor_key = carry
         state_snapshot = state  # record the state at the beginning of the overall step
-        disturbances_list = []
-        new_state = state
-        for _ in range(steps):
-            sensor_key, noisy_state = sensor.apply_noise(sensor_key, new_state)
-            disturbance = noisy_state - new_state
-            disturbances_list.append(disturbance)
-            u_ref = autopilot.get_u_ref(noisy_state)
+
+        # First substep: sample and apply noise.
+        sensor_key, noisy_state = sensor.apply_noise(sensor_key, state)
+        disturbance = noisy_state - state  # the applied disturbance vector (shape (16,))
+        u_ref = autopilot.get_u_ref(noisy_state)
+        xdot = controlled_f16(state, u_ref).xd
+        new_state = state + xdot * dt
+
+        # Remaining substeps: integrate without additional noise.
+        for _ in range(1, steps):
+            #u_ref = autopilot.get_u_ref(new_state)
             xdot = controlled_f16(new_state, u_ref).xd
             new_state = new_state + xdot * dt
-        disturbances_arr = jnp.stack(disturbances_list, axis=0)
+
         new_carry = (new_state, sensor_key)
-        return new_carry, (state_snapshot, disturbances_arr)
+        return new_carry, (state_snapshot, disturbance)
     
     def mu(self, state):
         # Returns the altitude; index 11 holds the altitude.
@@ -150,7 +157,7 @@ class F16System:
             current_alt = self.mu(new_state)
             new_min_alt = jnp.minimum(min_alt, current_alt)
             _, disturbances_arr = record
-            step_log_like = gaussian_log_pdf_traj(disturbances_arr, self.noise_mean, self.noise_cov)
+            step_log_like = gaussian_log_pdf(disturbances_arr, self.noise_mean, self.noise_cov)
             new_cum_log_like = cum_log_like + step_log_like
             return (new_state, new_sensor_key, new_min_alt, new_cum_log_like), (new_min_alt, new_cum_log_like, disturbances_arr)
         
@@ -188,13 +195,6 @@ def direct_estimation(system: F16System, num_trials: int) -> float:
 
 def gaussian_log_pdf(x, mean, cov):
     return multivar_gauss_logpdf(x, mean, cov)
-
-    # eps = 1e-30
-    # log_coeff = -0.5 * jnp.log(2 * jnp.pi) - jnp.log(std + eps)
-    # log_exponent = -0.5 * ((x - mean) / (std + eps))**2
-    # log_pdf = log_coeff + log_exponent
-    # log_pdf = jnp.where(std > 0, log_pdf, 0.0)
-    # return jnp.sum(log_pdf)
 
 def gaussian_log_pdf_traj(disturbances_arr, mean, cov):
     step_log_like = 0.0
