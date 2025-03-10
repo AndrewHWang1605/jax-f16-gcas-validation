@@ -193,3 +193,45 @@ def direct_estimation(system: F16System, num_trials: int) -> float:
         min_alts.append(min_alt)
         log_likes.append(cum_log_like)
     return failure_count / num_trials, min_alts, log_likes
+
+
+def generate_proposal_distributions(p_mean, p_cov, num_proposals=1, scale=1):
+    """
+    generate proposal distributions by taking the nominal distribution
+    parameters and perturbing them by a random value
+    """
+    qs = [] # proposal distributions
+    mask = jnp.zeros(16) # which components we are going to change for proposal
+    mask[6:9] = 1       # for now, we just change 6, 7, 8
+    # create proposal distributions by slightly perturbing the parameters of nominal dist
+    for i in range(num_proposals):
+        # use mask to only change the noisy features
+        q_mean = p_mean + (scale * jnp.random.randn(16) * mask)
+        q_cov = p_cov # only change the mean for now
+        # qs.append(jsp.stats.multivariate_normal(q_mean, system.noise_cov))
+        qs.append((q_mean, q_cov))
+    return qs
+
+
+def imp_sampl_fail_est(system, qs, trajs):
+    """
+    Importance sampling. Can do multiple importance sampling by increasing num_proposals.
+    Function expects a list of trajectories, which we can evaluate the logpdf over.
+    Expects a list of trajectories from prior rollout (so you don't have to call rollout over and over again)
+
+    TODO: define a trajectory_log_likelihood() function that computes the LL given a trajectory and 
+    distribution parameters
+    
+    """
+    num_rollouts = len(trajs)
+    ps_likelihood = [system.trajectory_log_likelihood(traj) for traj in trajs]
+    qs_likelihood = []
+    for i, q in enumerate(qs):
+        qs_i = [trajectory_log_likelihood(traj, mean=q[0], cov=q[1]) for traj in trajs] # define trajectory_log_likelihood()
+        qs_likelihood.append(qs_i)
+    ws = jnp.stack(qs_likelihood)
+    ws_mean = jnp.mean(ws, axis=1)      # using dm-mis
+    ws = jnp.array(ps_likelihood) / ws_mean
+    for i in range(num_rollouts):
+        weighted_sum += ws[i] * system.isSuccess(trajs[i])
+    return weighted_sum / num_rollouts
