@@ -70,11 +70,11 @@ class F16System:
         # Define the sensor noise distribution.
         self.noise_mean = jnp.zeros(16)
         noise_std = jnp.zeros(16) + 1e-10
-        noise_std = noise_std.at[6].set(0.06)   # Roll rate noise
+        noise_std = noise_std.at[6].set(0.03)   # Roll rate noise
         noise_std = noise_std.at[3].set(0.01)     # Roll angle noise
         self.noise_std = noise_std
         self.noise_cov = jnp.diag(jnp.square(self.noise_std))
-        if prop_noise_cov is None or prop_noise_mean is None:
+        if prop_noise_std is None or prop_noise_mean is None:
             self.sensor = GaussianNoisySensor(self.noise_mean, self.noise_cov)
         else:   
             prop_noise_cov = jnp.diag(jnp.square(prop_noise_std))
@@ -177,4 +177,3 @@ def gaussian_log_pdf_traj(disturbances_arr, mean, cov):
     for j in range(disturbances_arr.shape[0]):
         step_log_like += gaussian_log_pdf(disturbances_arr[j], mean, cov)
     return step_log_like
-    
