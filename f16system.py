@@ -1,11 +1,11 @@
 import math
 import jax
 import jax.numpy as jnp
+import numpy as np
 from numpy import deg2rad
 from jax.scipy.stats.multivariate_normal import logpdf as multivar_gauss_logpdf
 from dataclasses import dataclass
 from tqdm import tqdm
-import numpy as np
 
 from jax_f16.f16_utils import f16state
 from jax_f16.highlevel.controlled_f16 import controlled_f16
@@ -71,7 +71,7 @@ class F16System:
         # Define the sensor noise distribution.
         self.noise_mean = jnp.zeros(16)
         noise_std = jnp.zeros(16) + 1e-10
-        noise_std = noise_std.at[6].set(0.06)   # Roll rate noise
+        noise_std = noise_std.at[6].set(0.03)   # Roll rate noise
         noise_std = noise_std.at[3].set(0.01)     # Roll angle noise
         self.noise_std = noise_std
         self.noise_cov = jnp.diag(jnp.square(self.noise_std))
@@ -178,6 +178,7 @@ def gaussian_log_pdf_traj(disturbances_arr, mean, cov):
     for j in range(disturbances_arr.shape[0]):
         step_log_like += gaussian_log_pdf(disturbances_arr[j], mean, cov)
     return step_log_like
+
     
 
 def generate_proposal_distributions(p_mean, p_cov, num_proposals=1, scale=1):
@@ -221,27 +222,37 @@ def generate_proposal_distributions(p_mean, p_cov, num_proposals=1, scale=1):
 #             weighted_sum += ws[i]
 #     return weighted_sum / num_rollouts
 
-def imp_sampl_fail_est(p, qs, num_rollouts):
-    """
-    Importance sampling. Can do multiple importance sampling by increasing num_proposals (i.e len(qs) > 1).
-    This version calls rollouts rather than expects trajectories in advanced. Uses newer rollout function
-    rollout_min_altitude_and_loglik().
-    """
-    p_rollouts = [p.rollout_min_altitude_and_loglik() for _ in range(num_rollouts)]
-    p_ll = jnp.array([rollout[1] for rollout in p_rollouts])
-    trajs = [rollout[2][2] for rollout in p_rollouts]
-    qs_ll = []
-    for i, q in enumerate(qs):
-        qs_i = jnp.array([gaussian_log_pdf_traj(traj, q[0], q[1]) for traj in trajs])
-        qs_ll.append(qs_i)
-    ws = jnp.stack(qs_ll)
-    ws_mean = jnp.mean(ws, axis=0)      # using dm-mis
-    ws = p_ll / ws_mean
+def imp_sampl_fail_est(p, qs, num_rollouts, DMMIS=False):
+    q_systems = []
+    for q in qs:
+        q_system = F16System(prop_noise_mean=q[0], prop_noise_std=q[1])
+        q_systems.append(q_system)
+    rollouts = []
+    for q in tqdm(q_systems, desc="Running Rollouts"):
+        for j in range(num_rollouts):
+            rollouts.append(q.rollout_min_altitude_and_loglik())
+    ws = []
+    for rollout in tqdm(rollouts, desc="Calculating weights"):
+        traj = rollout[2][2].reshape(-1, 16)
+        print(traj.shape)
+        p_i = gaussian_log_pdf_traj(traj, p.noise_mean, p.noise_cov)
+        print(p_i)
+        if DMMIS:
+            denom = 0
+            for q in qs:
+                denom += gaussian_log_pdf_traj(traj, q[0], q[1])
+        else:
+            denom = rollout[1]
+        # print(denom)
+        ws.append(p_i / denom)
+        
+    print("Finished proposal distribution likelihood")
     weighted_sum = 0
-    for i in range(num_rollouts):
-        if p_rollouts[i][0] < CRASH_ALT:
+    for i in range(len(rollouts)):
+        if rollouts[i][0] < CRASH_ALT:
+            print("Found failure!")
             weighted_sum += ws[i]
-    return weighted_sum / num_rollouts
+    return weighted_sum / len(rollouts)
 
 
 def get_disturbance_arr(traj: FlightTrajectory):
