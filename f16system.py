@@ -46,8 +46,8 @@ class F16System:
                     q: float = 0.0,
                     r: float = 0.0,
                     sensor_seed: int = 0,
-                    prop_noise_mean: jnp.array = jnp.zeros(16),
-                    prop_noise_std: jnp.array = jnp.ones(16)*0.001):
+                    prop_noise_mean: jnp.array = None,
+                    prop_noise_std: jnp.array = None):
         
         self.T = T
         self.dt = dt
@@ -68,16 +68,17 @@ class F16System:
         self.ap = GcasAutopilot()
         
         # Define the sensor noise distribution.
-        # Only the IMU channels (indices 6,7,8) have noise
         self.noise_mean = jnp.zeros(16)
-        noise_std = jnp.ones(16) + 1e-10
-        noise_std = noise_std.at[6].set(0.2)   # Roll rate noise
-        noise_std = noise_std.at[7].set(0.2)   # Pitch rate noise
-        noise_std = noise_std.at[8].set(0.2)   # Yaw rate noise
+        noise_std = jnp.zeros(16) + 1e-10
+        noise_std = noise_std.at[6].set(0.06)   # Roll rate noise
+        noise_std = noise_std.at[3].set(0.01)     # Roll angle noise
         self.noise_std = noise_std
         self.noise_cov = jnp.diag(jnp.square(self.noise_std))
-        prop_noise_cov = jnp.diag(jnp.square(prop_noise_std))
-        self.sensor = GaussianNoisySensor(prop_noise_mean, prop_noise_cov)
+        if prop_noise_cov is None or prop_noise_mean is None:
+            self.sensor = GaussianNoisySensor(self.noise_mean, self.noise_cov)
+        else:   
+            prop_noise_cov = jnp.diag(jnp.square(prop_noise_std))
+            self.sensor = GaussianNoisySensor(prop_noise_mean, prop_noise_cov)
         
         # Save the initial flight state.
         self.initial_state = f16state(vt, [alpha, beta], [phi, theta, psi],
@@ -88,31 +89,24 @@ class F16System:
     def step(self, carry, i, autopilot, sensor, dt, steps):
         """
         Perform one overall simulation step.
-        
-        The disturbance returned is that from the first substep, so
-        the resulting disturbance array (over all overall steps) is of shape (T, 16).
-
-        Controller deciding new actuator output runs once for every step, but physics is
-        propagated steps times to reduce nonlinearity error.      
+        The carry is a tuple: (state, sensor_key).
+        At each Euler substep, we update the state with a newly sampled disturbance.
+        We record all substep disturbances.
         """
         state, sensor_key = carry
         state_snapshot = state  # record the state at the beginning of the overall step
-
-        # First substep: sample and apply noise.
-        sensor_key, noisy_state = sensor.apply_noise(sensor_key, state)
-        disturbance = noisy_state - state  # the applied disturbance vector (shape (16,))
-        u_ref = autopilot.get_u_ref(noisy_state)
-        xdot = controlled_f16(state, u_ref).xd
-        new_state = state + xdot * dt
-
-        # Remaining substeps: integrate without additional noise.
-        for _ in range(1, steps):
-            #u_ref = autopilot.get_u_ref(new_state)
+        disturbances_list = []
+        new_state = state
+        for _ in range(steps):
+            sensor_key, noisy_state = sensor.apply_noise(sensor_key, new_state)
+            disturbance = noisy_state - new_state
+            disturbances_list.append(disturbance)
+            u_ref = autopilot.get_u_ref(noisy_state)
             xdot = controlled_f16(new_state, u_ref).xd
             new_state = new_state + xdot * dt
-
+        disturbances_arr = jnp.stack(disturbances_list, axis=0)
         new_carry = (new_state, sensor_key)
-        return new_carry, (state_snapshot, disturbance)
+        return new_carry, (state_snapshot, disturbances_arr)
     
     def mu(self, state):
         # Returns the altitude; index 11 holds the altitude.
@@ -123,24 +117,6 @@ class F16System:
             if self.mu(step.state) < c:
                 return False
         return True
-    
-    def rollout(self) -> FlightTrajectory:
-        """
-        Run the simulation over self.T timesteps using jax.lax.scan,
-        recording at each step the state and the disturbances.
-        """
-        def scan_step(carry, i):
-            return self.step(carry, i, self.ap, self.sensor, self.dt, self.euler_steps)
-        
-        init_carry = (self.initial_state, self.sensor_key)
-        final_carry, records = jax.lax.scan(scan_step, init_carry, jnp.arange(self.T))
-        self.sensor_key = final_carry[1]  # update key for future rollouts
-        states, disturbances = records
-        trajectory = FlightTrajectory()
-        for i, (state, disturbance) in enumerate(zip(states, disturbances)):
-            time = i * self.dt
-            trajectory.add_step(time, state, disturbance)
-        return trajectory
     
     def rollout_min_altitude_and_loglik(self):
         """
@@ -157,7 +133,7 @@ class F16System:
             current_alt = self.mu(new_state)
             new_min_alt = jnp.minimum(min_alt, current_alt)
             _, disturbances_arr = record
-            step_log_like = gaussian_log_pdf(disturbances_arr, self.noise_mean, self.noise_cov)
+            step_log_like = gaussian_log_pdf_traj(disturbances_arr, self.noise_mean, self.noise_cov)
             new_cum_log_like = cum_log_like + step_log_like
             return (new_state, new_sensor_key, new_min_alt, new_cum_log_like), (new_min_alt, new_cum_log_like, disturbances_arr)
         
@@ -201,4 +177,4 @@ def gaussian_log_pdf_traj(disturbances_arr, mean, cov):
     for j in range(disturbances_arr.shape[0]):
         step_log_like += gaussian_log_pdf(disturbances_arr[j], mean, cov)
     return step_log_like
-
+    
