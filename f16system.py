@@ -239,8 +239,9 @@ def imp_sampl_fail_est(system, qs, trajs):
     # print(ws)
     weighted_sum = 0
     for i in range(num_rollouts):
-        weighted_sum += ws[i] * system.isSuccess(trajs[i].get_trajectory())
-    return (weighted_sum / num_rollouts).item()
+        if not system.isSuccess(trajs[i].get_trajectory()):
+            weighted_sum += ws[i]
+    return weighted_sum / num_rollouts
 
 def get_disturbance_arr(traj: FlightTrajectory):
     steps = traj.get_trajectory()
