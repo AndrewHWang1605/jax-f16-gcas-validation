@@ -24,7 +24,7 @@ class GaussianNoisySensor:
             cov_pd = cov + self.eps * jnp.eye(cov.shape[0])
             return jnp.linalg.cholesky(cov_pd)
 
-    def apply_noise(self, key, x_f16: f16state):
+    def get_noise(self, key, x_f16: f16state):
         """
         Given an input key and a flight state x_f16, split the key,
         generate a noise sample, and return the updated key along with the
@@ -33,4 +33,4 @@ class GaussianNoisySensor:
         key, subkey = random.split(key)
         z = random.normal(subkey, x_f16.shape)
         noise = self.mean + jnp.dot(z, self.cov_sqrt.T)
-        return key, x_f16 + noise
+        return key, noise

@@ -89,24 +89,32 @@ class F16System:
     def step(self, carry, i, autopilot, sensor, dt, steps):
         """
         Perform one overall simulation step.
+        
         The carry is a tuple: (state, sensor_key).
-        At each Euler substep, we update the state with a newly sampled disturbance.
-        We record all substep disturbances.
+        
+        We sample one disturbance at the beginning of the overall time step,
+        then, for each Euler substep, we compute the autopilot input using
+        (new_state + disturbance) and update new_state accordingly.
+        
+        Returns:
+        new_carry: (new_state, updated sensor_key)
+        A tuple (state_snapshot, disturbance) where disturbance is the single 16D vector applied at every substep.
         """
         state, sensor_key = carry
         state_snapshot = state  # record the state at the beginning of the overall step
-        disturbances_list = []
+        
+        # Sample one disturbance at the start:
+        sensor_key, disturbance = sensor.get_noise(sensor_key, state)
+        
         new_state = state
         for _ in range(steps):
-            sensor_key, noisy_state = sensor.apply_noise(sensor_key, new_state)
-            disturbance = noisy_state - new_state
-            disturbances_list.append(disturbance)
-            u_ref = autopilot.get_u_ref(noisy_state)
+            # Compute u_ref based on the "observed" state: new_state plus the fixed disturbance.
+            u_ref = autopilot.get_u_ref(new_state + disturbance)
             xdot = controlled_f16(new_state, u_ref).xd
             new_state = new_state + xdot * dt
-        disturbances_arr = jnp.stack(disturbances_list, axis=0)
         new_carry = (new_state, sensor_key)
-        return new_carry, (state_snapshot, disturbances_arr)
+        return new_carry, (state_snapshot, disturbance)
+
     
     def mu(self, state):
         # Returns the altitude; index 11 holds the altitude.
@@ -133,7 +141,7 @@ class F16System:
             current_alt = self.mu(new_state)
             new_min_alt = jnp.minimum(min_alt, current_alt)
             _, disturbances_arr = record
-            step_log_like = gaussian_log_pdf_traj(disturbances_arr, self.noise_mean, self.noise_cov)
+            step_log_like = gaussian_log_pdf(disturbances_arr, self.noise_mean, self.noise_cov)
             new_cum_log_like = cum_log_like + step_log_like
             return (new_state, new_sensor_key, new_min_alt, new_cum_log_like), (new_min_alt, new_cum_log_like, disturbances_arr)
         
