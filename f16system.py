@@ -181,81 +181,66 @@ def gaussian_log_pdf_traj(disturbances_arr, mean, cov):
 
     
 
-def generate_proposal_distributions(p_mean, p_cov, num_proposals=1, scale=1):
+def generate_proposal_distributions(p_mean, p_std, num_proposals=1, scale=1):
     """
     generate proposal distributions by taking the nominal distribution
     parameters and perturbing them by a random value
     """
     qs = [] # proposal distributions
-    mask = jnp.zeros(16) # which components we are going to change for proposal
-    mask[6:9] = 1       # for now, we just change 6, 7, 8
+    mask = np.zeros(16) # which components we are going to change for proposal
+    mask[3] = 1
+    mask[6] = 1
     # create proposal distributions by slightly perturbing the parameters of nominal dist
     for i in range(num_proposals):
         # use mask to only change the noisy features
-        q_mean = p_mean + (scale * jnp.random.randn(16) * mask)
-        q_cov = p_cov # only change the mean for now
-        # qs.append(jsp.stats.multivariate_normal(q_mean, system.noise_cov))
-        qs.append((q_mean, q_cov))
+        q_mean = p_mean + (scale * np.random.randn(16) * mask)
+        q_std = p_std # only change the mean for now
+        # qs.append(jsp.stats.multivariate_normal(q_mean, system.noise_std))
+        qs.append((q_mean, q_std))
     return qs
-
-# old version
-# def imp_sampl_fail_est(system, qs, trajs):
-#     """
-#     Importance sampling. Can do multiple importance sampling by increasing num_proposals.
-#     Function expects a list of trajectories, which we can evaluate the logpdf over.
-#     Expects a list of trajectories from prior rollout (so you don't have to call rollout over and over again)
-#     """
-#     num_rollouts = len(trajs)
-#     ps_likelihood = [gaussian_log_pdf_traj(get_disturbance_arr(traj), system.noise_mean, system.noise_cov)
-#                         for traj in trajs]
-#     qs_likelihood = []
-#     for i, q in enumerate(qs):
-#         qs_i = jnp.array([gaussian_log_pdf_traj(get_disturbance_arr(traj), q[0], q[1]) for traj in trajs])
-#         qs_likelihood.append(qs_i)
-#     ws = jnp.stack(qs_likelihood)
-#     ws_mean = jnp.mean(ws, axis=0)      # using dm-mis
-#     ws = jnp.array(ps_likelihood) / ws_mean
-#     # print(ws)
-#     weighted_sum = 0
-#     for i in range(num_rollouts):
-#         if not system.isSuccess(trajs[i].get_trajectory()):
-#             weighted_sum += ws[i]
-#     return weighted_sum / num_rollouts
 
 def imp_sampl_fail_est(p, qs, num_rollouts, DMMIS=False):
     q_systems = []
     for q in qs:
-        q_system = F16System(prop_noise_mean=q[0], prop_noise_std=q[1])
+        q_system = F16System(T=300, prop_noise_mean=q[0], prop_noise_std=q[1])
         q_systems.append(q_system)
     rollouts = []
-    for q in tqdm(q_systems, desc="Running Rollouts"):
-        for j in range(num_rollouts):
-            rollouts.append(q.rollout_min_altitude_and_loglik())
     ws = []
-    for rollout in tqdm(rollouts, desc="Calculating weights"):
-        traj = rollout[2][2].reshape(-1, 16)
-        print(traj.shape)
-        p_i = gaussian_log_pdf_traj(traj, p.noise_mean, p.noise_cov)
-        print(p_i)
-        if DMMIS:
-            denom = 0
-            for q in qs:
-                denom += gaussian_log_pdf_traj(traj, q[0], q[1])
-        else:
-            denom = rollout[1]
-        # print(denom)
-        ws.append(p_i / denom)
-        
+
+    if DMMIS:
+        print("Not implemented")
+        return 0.0
+        # for q in tqdm(q_systems, desc="Running Rollouts"):
+        #     for j in range(num_rollouts):
+        #         rollouts.append(q.rollout_min_altitude_and_loglik())
+        # for rollout in tqdm(rollouts, desc="Calculating weights"):
+        #     traj = rollout[2][2].reshape(-1, 16)
+        #     p_i = gaussian_log_pdf_traj(traj, p.noise_mean, p.noise_cov)
+        #     print("\np_i:", p_i)
+        #     denom = 0
+        #     for q in qs:
+        #         denom += gaussian_log_pdf_traj(traj, q[0], np.diag(np.square(q[1])))
+        #     # print(denom)
+        #     denom /= len(qs)
+        #     # else:
+        #     #     denom = rollout[1]
+        #     print("\nDenom:", denom)
+        #     ws.append(p_i / denom)
+
+    else:
+        for q in tqdm(q_systems, desc="Running Rollouts"):
+            for j in range(num_rollouts):
+                rollout = q.rollout_min_altitude_and_loglik()
+                rollouts.append(rollout)
+                traj = rollout[2][2].reshape(-1, 16)
+                p_i = gaussian_log_pdf_traj(traj, p.noise_mean, p.noise_cov)
+                q_i = gaussian_log_pdf_traj(traj, q.sensor.mean, q.sensor.cov)
+                ws.append(np.exp(p_i - q_i))
     print("Finished proposal distribution likelihood")
+    print(ws)
     weighted_sum = 0
     for i in range(len(rollouts)):
         if rollouts[i][0] < CRASH_ALT:
             print("Found failure!")
-            weighted_sum += ws[i]
+            weighted_sum += ws[i].item()
     return weighted_sum / len(rollouts)
-
-
-def get_disturbance_arr(traj: FlightTrajectory):
-    steps = traj.get_trajectory()
-    dist_arr = np.stack([step.disturbance for step in steps])
-    return dist_arr
