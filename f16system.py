@@ -70,8 +70,8 @@ class F16System:
         # Define the sensor noise distribution.
         self.noise_mean = jnp.zeros(16)
         noise_std = jnp.zeros(16) + 1e-10
-        noise_std = noise_std.at[6].set(0.03)   # Roll rate noise
-        noise_std = noise_std.at[3].set(0.01)     # Roll angle noise
+        noise_std = noise_std.at[6].set(0.005)   # Roll rate noise
+        noise_std = noise_std.at[3].set(0.005)     # Roll angle noise
         self.noise_std = noise_std
         self.noise_cov = jnp.diag(jnp.square(self.noise_std))
         if prop_noise_std is None or prop_noise_mean is None:
