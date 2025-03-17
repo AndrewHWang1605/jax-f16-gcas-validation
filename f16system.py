@@ -10,7 +10,7 @@ from jax_f16.f16_utils import f16state
 from jax_f16.highlevel.controlled_f16 import controlled_f16
 
 from gcas import GcasAutopilot
-from sensor import GaussianNoisySensor
+from sensor import GaussianNoisySensor, DetermNoiseSensor
 
 CRASH_ALT = 0
 
@@ -47,7 +47,9 @@ class F16System:
                     r: float = 0.0,
                     sensor_seed: int = 0,
                     prop_noise_mean: jnp.array = None,
-                    prop_noise_std: jnp.array = None):
+                    prop_noise_std: jnp.array = None,
+                    prop_noise_covariance: jnp.array = None,
+                    determ_noise_arr: jnp.array = None):
         
         self.T = T
         self.dt = dt
@@ -70,15 +72,19 @@ class F16System:
         # Define the sensor noise distribution.
         self.noise_mean = jnp.zeros(16)
         noise_std = jnp.zeros(16) + 1e-10
-        noise_std = noise_std.at[6].set(0.03)   # Roll rate noise
-        noise_std = noise_std.at[3].set(0.01)     # Roll angle noise
+        noise_std = noise_std.at[6].set(0.005)   # Roll rate noise
+        noise_std = noise_std.at[3].set(0.005)     # Roll angle noise
         self.noise_std = noise_std
         self.noise_cov = jnp.diag(jnp.square(self.noise_std))
-        if prop_noise_std is None or prop_noise_mean is None:
-            self.sensor = GaussianNoisySensor(self.noise_mean, self.noise_cov)
-        else:   
+        if prop_noise_std is not None and prop_noise_mean is not None:   
             prop_noise_cov = jnp.diag(jnp.square(prop_noise_std))
             self.sensor = GaussianNoisySensor(prop_noise_mean, prop_noise_cov)
+        if prop_noise_covariance is not None and prop_noise_mean is not None:   
+            self.sensor = GaussianNoisySensor(prop_noise_mean, prop_noise_covariance)
+        elif determ_noise_arr is not None:
+            self.sensor = DetermNoiseSensor(jnp.array(determ_noise_arr))
+        else:
+            self.sensor = GaussianNoisySensor(self.noise_mean, self.noise_cov)
         
         # Save the initial flight state.
         self.initial_state = f16state(vt, [alpha, beta], [phi, theta, psi],
@@ -104,7 +110,7 @@ class F16System:
         state_snapshot = state  # record the state at the beginning of the overall step
         
         # Sample one disturbance at the start:
-        sensor_key, disturbance = sensor.get_noise(sensor_key, state)
+        sensor_key, disturbance = sensor.get_noise(sensor_key, state, i)
         
         new_state = state
         for _ in range(steps):
@@ -183,5 +189,15 @@ def gaussian_log_pdf(x, mean, cov):
 def gaussian_log_pdf_traj(disturbances_arr, mean, cov):
     step_log_like = 0.0
     for j in range(disturbances_arr.shape[0]):
+        # print(disturbances_arr[j], mean, cov)
         step_log_like += gaussian_log_pdf(disturbances_arr[j], mean, cov)
+    return step_log_like
+
+def gaussian_log_pdf_from_noise_arr(disturbances_arr, mean, cov):
+    step_log_like = 0.0
+    full_mean = jnp.zeros(16)
+    for j in range(disturbances_arr.shape[0]):
+        full_mean = full_mean.at[6].set(mean[j,0])   # Roll rate noise
+        full_mean = full_mean.at[3].set(mean[j,1])   # Roll angle noise
+        step_log_like += gaussian_log_pdf(disturbances_arr[j], full_mean, cov)
     return step_log_like
